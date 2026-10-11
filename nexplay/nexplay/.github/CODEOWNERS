@@ -1,0 +1,9 @@
+# Who must review changes. Replace @your-github-username with your own account (or a team), then remove the leading #.
+# With branch protection's "Require review from Code Owners" turned on, these paths need your approval.
+#
+# *                         @your-github-username
+# /server/src/middleware/   @your-github-username
+# /server/src/routes/       @your-github-username
+# /server/prisma/           @your-github-username
+# /deploy/                  @your-github-username
+# /.github/                 @your-github-username

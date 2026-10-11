@@ -1,0 +1,221 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --blur: 20px;
+    box-sizing: border-box;
+    /* with viewport-fit=cover the page can reach under notches and system bars, so leave room for them */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *,
+  *::before,
+  *::after {
+    box-sizing: inherit;
+  }
+  /* The page colour lives on html only. If body painted its own background it would cover the gradient
+     orbs and particles, which sit on negative layers behind the content. */
+  html {
+    scroll-padding-top: env(safe-area-inset-top, 0px);
+    background: #060a18;
+  }
+  body {
+    @apply font-body text-ink-50 antialiased;
+    margin: 0;
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-display font-bold;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    margin: 0;
+  }
+  p {
+    margin: 0;
+  }
+  a {
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 3px solid theme('colors.neon.cyan');
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+  [hidden] {
+    display: none !important;
+  }
+  @media (max-width: 720px) {
+    :root {
+      --blur: 12px;
+    }
+  }
+}
+
+@layer components {
+  /* Liquid glass: translucent layers, backdrop blur, a luminous gradient edge and a soft top highlight. */
+  .glass,
+  .surface {
+    position: relative;
+    background: linear-gradient(120deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 42%), rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  }
+  .glass {
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(150%);
+    backdrop-filter: blur(var(--blur)) saturate(150%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 18px 50px rgba(2, 4, 16, 0.55);
+  }
+  .glass::before,
+  .surface::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.42), rgba(157, 92, 255, 0.28) 38%, rgba(41, 225, 255, 0.3) 72%, rgba(255, 255, 255, 0.12));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+  }
+  .surface::before {
+    opacity: 0.75;
+    transition: opacity 0.3s;
+  }
+  .surface:hover::before {
+    opacity: 1;
+  }
+  @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .glass {
+      background: rgba(16, 22, 52, 0.95);
+    }
+  }
+
+  .btn {
+    @apply inline-flex min-h-[44px] cursor-pointer items-center justify-center gap-2 rounded-full border border-transparent px-5 text-[0.95rem] font-semibold text-ink-50 no-underline transition;
+  }
+  .btn[disabled],
+  .btn[aria-disabled='true'] {
+    @apply cursor-not-allowed opacity-50;
+  }
+  .btn-primary {
+    @apply text-ink-950 shadow-glow;
+    background: linear-gradient(135deg, theme('colors.neon.violet'), theme('colors.neon.cyan'));
+  }
+  .btn-glass {
+    @apply border-white/20 bg-white/[0.08];
+  }
+  .btn-danger {
+    @apply border-red-400/50 bg-red-500/20 text-red-100;
+  }
+  @media (hover: hover) {
+    .btn:not([disabled]):hover {
+      transform: translateY(-1px);
+    }
+    .btn-glass:not([disabled]):hover {
+      @apply bg-white/[0.14];
+    }
+    .btn-primary:not([disabled]):hover {
+      box-shadow: 0 10px 30px rgba(41, 225, 255, 0.4);
+    }
+  }
+  .chip {
+    @apply inline-flex min-h-[44px] cursor-pointer items-center gap-2 rounded-full border border-white/[0.18] bg-white/[0.07] px-[18px] text-[0.93rem] font-semibold text-ink-50 no-underline;
+  }
+  .chip[aria-pressed='true'] {
+    @apply border-white/45 text-white;
+    background: linear-gradient(135deg, rgba(157, 92, 255, 0.55), rgba(41, 225, 255, 0.4));
+  }
+  @media (hover: hover) {
+    .chip:hover {
+      @apply bg-white/[0.13];
+    }
+  }
+  .tag {
+    @apply inline-block self-start rounded-full border border-neon-cyan/40 bg-neon-cyan/[0.12] px-[11px] py-[3px] text-[0.8rem] font-semibold text-[#c2f5ff];
+  }
+  .tag-gold {
+    @apply border-neon-gold/40 bg-neon-gold/[0.12] text-[#fff0a8];
+  }
+  .tag-mint {
+    @apply border-neon-mint/40 bg-neon-mint/[0.12] text-[#c9f8de];
+  }
+  .tag-muted {
+    @apply border-white/25 bg-white/[0.08] text-ink-50/80;
+  }
+  .field {
+    @apply flex min-h-[44px] items-center gap-2.5 rounded-full border border-white/[0.16] bg-white/[0.07] px-4 text-ink-50/60;
+  }
+  .field:focus-within {
+    outline: 3px solid theme('colors.neon.cyan');
+    outline-offset: 2px;
+  }
+  .field input {
+    @apply min-h-[42px] min-w-0 flex-1 border-0 bg-transparent text-ink-50 outline-none;
+    font: inherit;
+  }
+  .field input::placeholder {
+    @apply text-ink-50/60;
+  }
+  .input,
+  .select,
+  .textarea {
+    @apply min-h-[44px] w-full rounded-inner border border-white/[0.18] bg-white/[0.07] px-3.5 text-ink-50;
+    font: inherit;
+  }
+  .textarea {
+    @apply min-h-[110px] py-2.5;
+  }
+  .input[aria-invalid='true'],
+  .textarea[aria-invalid='true'] {
+    @apply border-red-300/70;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-semibold text-ink-50/90;
+  }
+  .help {
+    @apply mt-1 text-sm text-ink-50/65;
+  }
+  .error-text {
+    @apply mt-1 text-sm text-red-200;
+  }
+  .page-title {
+    @apply pb-2 pt-9;
+  }
+  .page-title h1 {
+    @apply mb-2.5 text-[clamp(1.6rem,4vw,2.4rem)];
+  }
+  .panel-pad {
+    @apply p-5 sm:p-7;
+  }
+}
+
+@layer utilities {
+  .wrap {
+    width: min(1160px, calc(100% - 32px));
+    margin-inline: auto;
+  }
+  .text-muted {
+    @apply text-ink-50/75;
+  }
+  .text-faint {
+    @apply text-ink-50/60;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

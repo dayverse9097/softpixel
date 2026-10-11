@@ -1,0 +1,146 @@
+name: Deploy
+
+# Builds the images and the web app, copies them to your server over SSH, and checks the site afterwards.
+# Start it from the Actions tab (Run workflow), or push a version tag such as v1.0.0.
+# The "production" environment can require a person to approve each run (Settings > Environments).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: Build and scan images
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+
+  web:
+    name: Build the web app
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-app
+        with:
+          working-directory: web
+
+      - name: Build for your domains
+        working-directory: web
+        env:
+          VITE_API_URL: https://${{ vars.API_HOST }}
+          VITE_GAMES_ORIGIN: https://${{ vars.GAMES_HOST }}
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to the server
+    needs: [images, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://${{ vars.APP_HOST }}
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/nexplay' }}
+      APP_HOST: ${{ vars.APP_HOST }}
+      API_HOST: ${{ vars.API_HOST }}
+      GAMES_HOST: ${{ vars.GAMES_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web-dist
+
+      - name: Check the settings are filled in
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          missing=0
+          for name in DEPLOY_HOST DEPLOY_USER APP_HOST API_HOST GAMES_HOST DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error title=Missing setting::$name is not set. See docs/GITHUB.md, step 'Add the deploy settings'."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Work out which images to deploy
+        id: images
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          short="$(echo "$GITHUB_SHA" | cut -c1-7)"
+          echo "server=ghcr.io/$owner/nexplay-server:sha-$short" >> "$GITHUB_OUTPUT"
+          echo "tools=ghcr.io/$owner/nexplay-server-tools:sha-$short" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf 'Host deploy-target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n' \
+            "$DEPLOY_HOST" "$DEPLOY_USER" "$DEPLOY_PORT" > ~/.ssh/config
+
+      - name: Copy the web app and server files
+        run: |
+          ssh deploy-target "mkdir -p '$DEPLOY_PATH/web'"
+          rsync -az --delete --exclude headers.caddy --exclude _headers --exclude _redirects \
+            -e ssh web-dist/ "deploy-target:$DEPLOY_PATH/web/"
+          rsync -az -e ssh web-dist/headers.caddy "deploy-target:$DEPLOY_PATH/headers.caddy"
+          rsync -az -e ssh deploy/docker-compose.yml deploy/Caddyfile deploy/deploy.sh deploy/init-env.sh "deploy-target:$DEPLOY_PATH/"
+
+      - name: Deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          SERVER_IMAGE: ${{ steps.images.outputs.server }}
+          TOOLS_IMAGE: ${{ steps.images.outputs.tools }}
+        run: |
+          # The server pulls the images with this run's short-lived token, so no long-lived registry password is stored there.
+          printf '%s' "$GH_TOKEN" | ssh deploy-target "docker login ghcr.io -u '$ACTOR' --password-stdin"
+          ssh deploy-target "cd '$DEPLOY_PATH' && sh deploy.sh '$SERVER_IMAGE' '$TOOLS_IMAGE'; status=\$?; docker logout ghcr.io >/dev/null 2>&1; exit \$status"
+
+      - name: Check the live site
+        run: |
+          retry="--retry 12 --retry-delay 5 --retry-all-errors --max-time 20"
+          curl -fsS $retry "https://$API_HOST/healthz"
+          curl -fsS $retry "https://$API_HOST/readyz"
+          curl -fsSI $retry "https://$APP_HOST/" | grep -qi '^content-security-policy:'
+          curl -fsSI $retry "https://$APP_HOST/" | grep -qi '^strict-transport-security:'
+          curl -fsSI $retry "https://$GAMES_HOST/healthz" | grep -qi '^content-security-policy:'
+          # a website we do not trust must not be allowed to call the API with cookies
+          if curl -sI -H 'Origin: https://evil.example' "https://$API_HOST/api/games" | grep -qi '^access-control-allow-origin:'; then
+            echo "The API allows an untrusted origin." >&2
+            exit 1
+          fi

@@ -1,0 +1,34 @@
+name: Dependency audit
+
+# Checks the packages the app really ships against the public advisory database.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  pull_request:
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [server, web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-app
+        with:
+          working-directory: ${{ matrix.dir }}
+
+      - name: npm audit (shipped packages, high severity and above)
+        working-directory: ${{ matrix.dir }}
+        run: npm audit --omit=dev --audit-level=high

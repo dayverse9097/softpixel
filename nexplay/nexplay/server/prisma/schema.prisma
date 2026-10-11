@@ -1,0 +1,132 @@
+// NEXPLAY database schema.
+// Run migrations with the owner role (MIGRATOR_DATABASE_URL). The running server uses two other,
+// least-privilege roles; see sql/roles.sql and sql/rls.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("MIGRATOR_DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+}
+
+enum GameStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model User {
+  id             String         @id @default(uuid()) @db.Uuid
+  email          String         @unique @db.VarChar(254)
+  passwordHash   String
+  role           Role           @default(ADMIN)
+  totpSecretEnc  String? // AES-256-GCM encrypted; the key lives only in the server environment
+  totpEnabled    Boolean        @default(false)
+  totpLastStep   Int? // last accepted 30-second step, so a code cannot be replayed
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  games          Game[]
+  recoveryCodes  RecoveryCode[]
+  auditEvents    AuditEvent[]
+}
+
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  codeHash  String    @db.VarChar(64) // keyed hash; the code itself is never stored
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, codeHash])
+}
+
+model Game {
+  id               String           @id @default(uuid()) @db.Uuid
+  slug             String           @unique @db.VarChar(60)
+  title            String           @db.VarChar(80)
+  description      String           @db.VarChar(2000)
+  instructions     String           @default("") @db.VarChar(2000)
+  category         String           @db.VarChar(40)
+  controls         Json             @default("[]")
+  coverKey         String?          @db.VarChar(120)
+  status           GameStatus       @default(DRAFT)
+  featured         Boolean          @default(false)
+  currentVersionId String?          @unique @db.Uuid
+  createdById      String           @db.Uuid
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  publishedAt      DateTime?
+  createdBy        User             @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  currentVersion   GameVersion?     @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  versions         GameVersion[]    @relation("GameVersions")
+  launches         GameLaunchDaily[]
+
+  @@index([status, publishedAt])
+  @@index([status, category])
+}
+
+model GameVersion {
+  id            String   @id @default(uuid()) @db.Uuid
+  gameId        String   @db.Uuid
+  version       String   @db.VarChar(32)
+  storagePrefix String   @db.VarChar(200) // server-generated: games/<gameId>/<versionId>/
+  fileCount     Int      @default(0)
+  totalBytes    Int      @default(0)
+  scanned       Boolean  @default(false) // true when a malware scanner checked the archive
+  createdAt     DateTime @default(now())
+  game          Game     @relation("GameVersions", fields: [gameId], references: [id], onDelete: Cascade)
+  current       Game?    @relation("CurrentVersion")
+
+  @@unique([gameId, version])
+  @@index([gameId, createdAt])
+}
+
+// One counter per game per day. No visitor identifiers.
+model GameLaunchDaily {
+  gameId String   @db.Uuid
+  day    DateTime @db.Date
+  count  Int      @default(0)
+  game   Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@id([gameId, day])
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String   @db.VarChar(60)
+  targetType String?  @db.VarChar(30)
+  targetId   String?  @db.VarChar(64)
+  meta       Json     @default("{}")
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([action, createdAt])
+}
+
+// Table used by connect-pg-simple for server-side sessions.
+model SessionRow {
+  sid    String   @id @db.VarChar
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire])
+  @@map("session")
+}
+
+// Table used by rate-limiter-flexible when RATE_LIMIT_STORE=postgres, so limits are shared across instances.
+model RateLimitRow {
+  key    String  @id @db.VarChar(255)
+  points Int     @default(0)
+  expire BigInt?
+
+  @@map("rate_limit")
+}

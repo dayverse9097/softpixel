@@ -1,0 +1,33 @@
+name: Set up Node and install dependencies
+description: Installs Node 22 and the npm packages of one folder. Uses the lockfile when there is one.
+
+inputs:
+  working-directory:
+    description: Folder that contains package.json (server or web)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Cache npm downloads
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: npm-${{ runner.os }}-${{ inputs.working-directory }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/package.json', inputs.working-directory)) }}
+        restore-keys: |
+          npm-${{ runner.os }}-${{ inputs.working-directory }}-
+
+    - name: Install packages
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -f package-lock.json ]; then
+          npm ci
+        else
+          echo "::warning title=No lockfile::${{ inputs.working-directory }}/package-lock.json is missing, so versions are not pinned. Run the 'Create lockfiles' workflow and merge its pull request (docs/GITHUB.md)."
+          npm install
+        fi

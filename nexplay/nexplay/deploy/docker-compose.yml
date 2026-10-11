@@ -1,0 +1,170 @@
+# Production stack for ONE server: HTTPS front door (Caddy), the API, the game host and Postgres.
+# Game builds are stored in a private S3-compatible bucket that you create (Cloudflare R2, Backblaze B2, AWS S3, ...).
+# Everything is configured by the .env file next to this one (see init-env.sh) and started by deploy.sh.
+
+name: nexplay
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+x-app-env: &app-env
+  NODE_ENV: production
+  TRUST_PROXY: "1" # exactly one proxy (Caddy) sits in front
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgresql://nexplay_app:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/nexplay
+  DATABASE_URL_PUBLIC: postgresql://nexplay_public:${PUBLIC_DB_PASSWORD:?set PUBLIC_DB_PASSWORD in .env}@db:5432/nexplay
+  APP_ORIGIN: https://${APP_HOST:?set APP_HOST in .env}
+  GAMES_ORIGIN: https://${GAMES_HOST:?set GAMES_HOST in .env}
+  SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+  PREVIEW_SECRET: ${PREVIEW_SECRET:?set PREVIEW_SECRET in .env}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+  STORAGE_DRIVER: s3
+  S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET in .env}
+  S3_REGION: ${S3_REGION:-auto}
+  S3_ENDPOINT: ${S3_ENDPOINT:-}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env}
+  RATE_LIMIT_STORE: postgres # limits are kept in the database so they survive restarts
+  UPLOAD_TMP_DIR: /tmp/nexplay-uploads
+  CLAMAV_HOST: ${CLAMAV_HOST:-}
+
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  logging: *logging
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_HOST: ${APP_HOST:?set APP_HOST in .env}
+      API_HOST: ${API_HOST:?set API_HOST in .env}
+      GAMES_HOST: ${GAMES_HOST:?set GAMES_HOST in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./headers.caddy:/etc/caddy/headers.caddy:ro
+      - ./web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, games]
+    logging: *logging
+
+  api:
+    <<: *hardened
+    image: ${NEXPLAY_IMAGE:?deploy.sh sets NEXPLAY_IMAGE}
+    environment:
+      <<: *app-env
+      SERVICE: api
+    depends_on:
+      db:
+        condition: service_healthy
+
+  games:
+    <<: *hardened
+    image: ${NEXPLAY_IMAGE:?deploy.sh sets NEXPLAY_IMAGE}
+    environment:
+      <<: *app-env
+      SERVICE: games
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexplay_migrator
+      POSTGRES_PASSWORD: ${ADMIN_DB_PASSWORD:?set ADMIN_DB_PASSWORD in .env}
+      POSTGRES_DB: nexplay
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexplay_migrator -d nexplay"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  # Nightly database dump kept for 14 days. This is a safety net, not a full backup plan:
+  # also copy these files off the server (see docs/DEPLOYMENT.md).
+  backup:
+    image: postgres:16
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${ADMIN_DB_PASSWORD}
+    volumes:
+      - backups:/backups
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          file="/backups/nexplay-$$(date +%Y%m%d-%H%M%S).sql.gz"
+          if pg_dump -h db -U nexplay_migrator -d nexplay --no-owner | gzip > "$$file"; then echo "backup written: $$file"; else rm -f "$$file"; echo "backup FAILED"; fi
+          find /backups -name 'nexplay-*.sql.gz' -mtime +14 -delete
+          sleep 86400
+        done
+    logging: *logging
+
+  # ---- One-off tools. Run with: docker compose --profile tools run --rm <name> ----
+
+  # Creates the database roles and applies migrations. deploy.sh runs it on every deploy.
+  bootstrap:
+    image: ${NEXPLAY_TOOLS_IMAGE:?deploy.sh sets NEXPLAY_TOOLS_IMAGE}
+    profiles: [tools]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADMIN_DATABASE_URL: postgresql://nexplay_migrator:${ADMIN_DB_PASSWORD}@db:5432/nexplay
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      PUBLIC_DB_PASSWORD: ${PUBLIC_DB_PASSWORD}
+
+  # Creates an administrator (asks for the email and a hidden password):
+  #   docker compose --profile tools run --rm admin
+  admin:
+    image: ${NEXPLAY_TOOLS_IMAGE:?deploy.sh sets NEXPLAY_TOOLS_IMAGE}
+    profiles: [tools]
+    entrypoint: ["npx", "tsx", "src/scripts/create-admin.ts"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MIGRATOR_DATABASE_URL: postgresql://nexplay_migrator:${ADMIN_DB_PASSWORD}@db:5432/nexplay
+
+  # Optional malware scanning of uploaded games. Enable it by adding these two lines to .env:
+  #   COMPOSE_PROFILES=scan
+  #   CLAMAV_HOST=clamav
+  # It needs about 2 GB of memory. The stream limit must be at least MAX_ARCHIVE_MB (200 by default).
+  clamav:
+    image: clamav/clamav:stable
+    profiles: [scan]
+    restart: unless-stopped
+    environment:
+      CLAMD_CONF_StreamMaxLength: 250M
+    volumes:
+      - clamav_db:/var/lib/clamav
+    logging: *logging
+
+volumes:
+  db_data:
+  backups:
+  caddy_data:
+  caddy_config:
+  clamav_db:

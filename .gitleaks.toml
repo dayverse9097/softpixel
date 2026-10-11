@@ -1,0 +1,15 @@
+title = "NEXPLAY secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders, test fixtures and CI throwaways. None of these are real credentials."
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''^server/tests/''',
+  '''^web/tests/''',
+  '''^web/e2e/''',
+  '''^\.github/workflows/ci\.yml$''',
+  '''^docs/''',
+]

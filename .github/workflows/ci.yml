@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repo:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the YAML reader
+        run: pip install pyyaml
+
+      - name: Look for leaked secrets, risky code patterns, workflow mistakes and broken links
+        run: python3 scripts/check-repo.py
+
+  server:
+    name: Server (types, lint, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nexplay_migrator
+          POSTGRES_PASSWORD: ci-owner-password
+          POSTGRES_DB: nexplay_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nexplay_migrator -d nexplay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      MIGRATOR_DATABASE_URL: postgresql://nexplay_migrator:ci-owner-password@localhost:5432/nexplay_test
+      TEST_DATABASE_URL: postgresql://nexplay_migrator:ci-owner-password@localhost:5432/nexplay_test
+      TEST_DATABASE_URL_APP: postgresql://nexplay_app:ci-app-password@localhost:5432/nexplay_test
+      TEST_DATABASE_URL_PUBLIC: postgresql://nexplay_public:ci-public-password@localhost:5432/nexplay_test
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-app
+        with:
+          working-directory: server
+
+      - name: Generate the database client
+        run: npx prisma generate
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Prepare the test database (roles, then migrations)
+        run: |
+          psql "$MIGRATOR_DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -v app_password=ci-app-password -v public_password=ci-public-password \
+            -f prisma/sql/create-roles.sql
+          npx prisma migrate deploy
+
+      - name: Check the migrations still match the schema (advisory)
+        continue-on-error: true
+        run: |
+          psql "$MIGRATOR_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'create database shadow'
+          npx prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url postgresql://nexplay_migrator:ci-owner-password@localhost:5432/shadow \
+            --exit-code
+
+      - name: Integration tests (login, CSRF, uploads, isolation, row-level security)
+        run: npm run test:integration
+
+      - name: Build the production server and start it
+        env:
+          NODE_ENV: development
+          SERVICE: all
+          DATABASE_URL: postgresql://nexplay_app:ci-app-password@localhost:5432/nexplay_test
+          DATABASE_URL_PUBLIC: postgresql://nexplay_public:ci-public-password@localhost:5432/nexplay_test
+          APP_ORIGIN: http://localhost:5173
+          GAMES_ORIGIN: http://localhost:4001
+          SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789abcdef
+          PREVIEW_SECRET: ci-preview-secret-0123456789abcdef0123456789abcdef
+          ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          STORAGE_LOCAL_DIR: ${{ runner.temp }}/storage
+          UPLOAD_TMP_DIR: ${{ runner.temp }}/uploads
+          LOG_LEVEL: warn
+        run: |
+          npm run build
+          node dist/index.js &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:4000/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:4000/healthz
+          curl -fsS http://localhost:4000/readyz
+          curl -fsS http://localhost:4000/api/games | grep -q '"items"'
+          curl -fsSI http://localhost:4001/healthz | grep -qi '^content-security-policy:'
+
+  web:
+    name: Web (types, lint, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-app
+        with:
+          working-directory: web
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit, component and accessibility tests
+        run: npm test
+
+      - name: Production build
+        env:
+          VITE_API_URL: https://api.example.test
+          VITE_GAMES_ORIGIN: https://games.example.test
+        run: npm run build
+
+      - name: Check the build has no source maps and the headers file exists
+        run: |
+          test -f dist/_headers
+          test -f dist/headers.caddy
+          if find dist -name '*.map' | grep -q .; then echo "Source maps must not be published." >&2; exit 1; fi
+
+  e2e:
+    name: Browser tests (desktop and phone)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-node-app
+        with:
+          working-directory: web
+
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the browser tests
+        run: npm run e2e
+
+      - name: Keep the report if something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
