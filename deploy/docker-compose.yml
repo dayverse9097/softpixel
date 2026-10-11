@@ -84,7 +84,7 @@ services:
         condition: service_healthy
 
   db:
-    image: postgres:16
+    image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_USER: nexplay_migrator
@@ -102,7 +102,7 @@ services:
   # Nightly database dump kept for 14 days. This is a safety net, not a full backup plan:
   # also copy these files off the server (see docs/DEPLOYMENT.md).
   backup:
-    image: postgres:16
+    image: postgres:18
     restart: unless-stopped
     depends_on:
       db:
